@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Monitor de Procesamiento de Imágenes</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .stat-card { transition: transform 0.2s; }
+        .stat-card:hover { transform: scale(1.05); }
+        .val { font-size: 3rem; font-weight: bold; }
+        .sys-card { font-family: monospace; font-size: 0.9rem; }
+        .process-row { font-family: monospace; font-size: 0.85rem; }
+        .progress-thin { height: 6px; }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container mt-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2>Panel de Control: Servidor de Imágenes</h2>
+            <button class="btn btn-outline-secondary btn-sm" onclick="fetchSystem()">Actualizar Sistema</button>
+        </div>
+        
+        <div class="mb-3">
+            <button class="btn btn-success me-2" onclick="startProcess(false)">Iniciar (Sincronizado)</button>
+            <button class="btn btn-danger me-2" onclick="startProcess(true)">Iniciar (Con Bug de Concurrencia)</button>
+            <button class="btn btn-secondary me-2" onclick="resetProcess()">Reset</button>
+            <span id="status-badge" class="badge bg-secondary ms-3">Inactivo</span>
+        </div>
+
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card text-white bg-primary stat-card">
+                    <div class="card-header">Trabajos Recibidos</div>
+                    <div class="card-body"><p class="card-text val" id="val-received">0</p></div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-white bg-warning stat-card">
+                    <div class="card-header">En Cola (Pendientes)</div>
+                    <div class="card-body"><p class="card-text val" id="val-pending">0</p></div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-white bg-success stat-card">
+                    <div class="card-header">Procesados</div>
+                    <div class="card-body"><p class="card-text val" id="val-processed">0 <span id="target-total" class="fs-5 fw-normal text-light">/ 100</span></p></div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-white bg-danger stat-card">
+                    <div class="card-header">Fallidos</div>
+                    <div class="card-body"><p class="card-text val" id="val-failed">0</p></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="alert alert-info mt-3" id="result-msg" style="display: none;"></div>
+
+        <!-- Panel de Monitoreo del Sistema -->
+        <div class="card mb-4">
+            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Monitoreo del Sistema en Tiempo Real</h5>
+                <span id="sys-refresh" class="badge bg-info">Auto: ON</span>
+            </div>
+            <div class="card-body">
+                <div class="row mb-3">
+                    <div class="col-md-3">
+                        <div class="card bg-light sys-card">
+                            <div class="card-body text-center">
+                                <div class="text-muted small">CPU Total</div>
+                                <div class="val text-primary" id="sys-cpu">0%</div>
+                                <div class="progress progress-thin mt-2">
+                                    <div class="progress-bar bg-primary" id="sys-cpu-bar" role="progressbar" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light sys-card">
+                            <div class="card-body text-center">
+                                <div class="text-muted small">Memoria</div>
+                                <div class="val text-warning" id="sys-mem">0%</div>
+                                <div class="progress progress-thin mt-2">
+                                    <div class="progress-bar bg-warning" id="sys-mem-bar" role="progressbar" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light sys-card">
+                            <div class="card-body text-center">
+                                <div class="text-muted small">Procesos Python</div>
+                                <div class="val text-info" id="sys-procs">0</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-light sys-card">
+                            <div class="card-body text-center">
+                                <div class="text-muted small">Hilos Totales</div>
+                                <div class="val text-success" id="sys-threads">0</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card bg-light">
+                    <div class="card-header">Detalle de Procesos Python</div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover mb-0">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th>PID</th>
+                                        <th>Nombre</th>
+                                        <th>CPU %</th>
+                                        <th>Memoria %</th>
+                                        <th>Hilos</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sys-proc-table"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let intervalId = null;
+        let sysIntervalId = null;
+
+        function startProcess(bugMode) {
+            fetch('/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bug: bugMode })
+            }).then(res => res.json()).then(data => {
+                if(data.status === 'started') {
+                    document.getElementById('status-badge').className = 'badge bg-primary ms-3';
+                    document.getElementById('status-badge').innerText = 'Procesando...';
+                    document.getElementById('result-msg').style.display = 'none';
+                    if (!intervalId) intervalId = setInterval(fetchStats, 500);
+                } else if (data.status === 'already_running') {
+                    alert('Ya hay un proceso en ejecución. Usa Reset para reiniciar.');
+                }
+            });
+        }
+
+        function resetProcess() {
+            fetch('/reset', { method: 'POST' }).then(res => res.json()).then(data => {
+                if(data.status === 'reset') {
+                    document.getElementById('val-received').innerText = '0';
+                    document.getElementById('val-pending').innerText = '0';
+                    document.getElementById('val-processed').innerHTML = '0 <span id="target-total" class="fs-5 fw-normal text-light">/ 100</span>';
+                    document.getElementById('val-failed').innerText = '0';
+                    document.getElementById('status-badge').className = 'badge bg-secondary ms-3';
+                    document.getElementById('status-badge').innerText = 'Inactivo';
+                    document.getElementById('result-msg').style.display = 'none';
+                    if (intervalId) { clearInterval(intervalId); intervalId = null; }
+                }
+            });
+        }
+
+        function fetchStats() {
+            fetch('/stats').then(res => res.json()).then(data => {
+                document.getElementById('val-received').innerText = data.received;
+                document.getElementById('val-pending').innerText = data.pending;
+                document.getElementById('val-processed').innerHTML = `${data.processed} <span class="fs-5 fw-normal text-light">/ ${data.total}</span>`;
+                document.getElementById('val-failed').innerText = data.failed;
+                
+                if (!data.running && data.received > 0) {
+                    clearInterval(intervalId);
+                    intervalId = null;
+                    document.getElementById('status-badge').className = 'badge bg-secondary ms-3';
+                    document.getElementById('status-badge').innerText = 'Finalizado';
+                    
+                    const msgDiv = document.getElementById('result-msg');
+                    msgDiv.style.display = 'block';
+                    if (data.processed === data.total) {
+                        msgDiv.className = 'alert alert-success mt-3';
+                        msgDiv.innerText = 'ÉXITO: Se procesaron todos los trabajos correctamente sin pérdida de datos.';
+                    } else {
+                        msgDiv.className = 'alert alert-danger mt-3';
+                        msgDiv.innerText = `FALLO DETECTADO: Condición de carrera. Se enviaron ${data.total} trabajos pero solo se registraron ${data.processed}. Fallidos: ${data.failed}.`;
+                    }
+                }
+            });
+        }
+
+        function fetchSystem() {
+            fetch('/system').then(res => res.json()).then(data => {
+                if (data.error) {
+                    console.error('System error:', data.error);
+                    return;
+                }
+                document.getElementById('sys-cpu').innerText = data.cpu_percent.toFixed(1) + '%';
+                document.getElementById('sys-cpu-bar').style.width = data.cpu_percent + '%';
+                document.getElementById('sys-mem').innerText = data.mem_percent.toFixed(2) + '%';
+                document.getElementById('sys-mem-bar').style.width = data.mem_percent + '%';
+                document.getElementById('sys-procs').innerText = data.processes.length;
+                document.getElementById('sys-threads').innerText = data.threads_total;
+
+                const tbody = document.getElementById('sys-proc-table');
+                tbody.innerHTML = '';
+                data.processes.forEach(p => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'process-row';
+                    tr.innerHTML = `
+                        <td>${p.pid}</td>
+                        <td>${p.name}</td>
+                        <td>${p.cpu.toFixed(1)}%</td>
+                        <td>${p.mem.toFixed(2)}%</td>
+                        <td>${p.threads}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            });
+        }
+
+        // Auto-refresh system stats every 2 seconds
+        sysIntervalId = setInterval(fetchSystem, 2000);
+        fetchSystem(); // Initial load
+    </script>
+</body>
+</html>
